@@ -1,0 +1,22 @@
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.safetensors binary
+*.bin binary
+*.onnx binary
+*.onnx_data binary
+*.pt binary
+
+*.lock linguist-generated
+package-lock.json linguist-generated
+pnpm-lock.yaml linguist-generated
+uv.lock linguist-generated

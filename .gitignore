@@ -1,0 +1,71 @@
+# Environment
+.env
+.env.*
+!.env.example
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Data / runtime
+data/
+logs/
+*.log
+*.sqlite
+*.db
+pg_data/
+redis_data/
+rabbit_data/
+prom_data/
+loki_data/
+tempo_data/
+grafana_data/
+milvus_data/
+etcd_data/
+minio_data/
+kb_storage/
+bm25_index/
+
+# Models (never commit)
+models/
+*.safetensors
+*.bin
+*.onnx
+*.onnx_data
+*.pt
+
+# Test artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets
+*.pem
+*.key
+secrets/

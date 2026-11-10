@@ -1,0 +1,168 @@
+name: incidentpilot
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-development}
+  APP_NAME: IncidentPilot
+  APP_VERSION: ${APP_VERSION:-0.1.0}
+  SECRET_KEY: ${SECRET_KEY:-dev-only-secret-key-change-me-32-bytes}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8080}
+  DATABASE_URL: postgresql+asyncpg://incidentpilot:${POSTGRES_PASSWORD:-incidentpilot}@postgres:5432/incidentpilot
+  DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-10}
+  DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-20}
+  REDIS_URL: redis://redis:6379/0
+  RABBITMQ_URL: amqp://incidentpilot:${RABBITMQ_PASSWORD:-incidentpilot}@rabbitmq:5672/
+  RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-incidentpilot}
+  RABBITMQ_INVESTIGATION_QUEUE: ${RABBITMQ_INVESTIGATION_QUEUE:-incidentpilot.investigation}
+  RABBITMQ_DLQ: ${RABBITMQ_DLQ:-incidentpilot.dlq}
+  WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-dev-webhook-token}
+  INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+  REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+  BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@incidentpilot.io}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-ChangeMe123456!}
+  BOOTSTRAP_SRE_EMAIL: ${BOOTSTRAP_SRE_EMAIL:-sre@incidentpilot.io}
+  BOOTSTRAP_SRE_PASSWORD: ${BOOTSTRAP_SRE_PASSWORD:-ChangeMe123456!}
+  BOOTSTRAP_VIEWER_EMAIL: ${BOOTSTRAP_VIEWER_EMAIL:-viewer@incidentpilot.io}
+  BOOTSTRAP_VIEWER_PASSWORD: ${BOOTSTRAP_VIEWER_PASSWORD:-ChangeMe123456!}
+  DEMO_MODE: ${DEMO_MODE:-false}
+  AGENT_ENABLED: ${AGENT_ENABLED:-false}
+  REMEDIATION_ENABLED: ${REMEDIATION_ENABLED:-false}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: incidentpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-incidentpilot}
+      POSTGRES_DB: incidentpilot
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U incidentpilot -d incidentpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks: [data]
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks: [data]
+    logging: *default-logging
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: incidentpilot
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-incidentpilot}
+    ports:
+      - "${RABBITMQ_PORT:-5673}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15673}:15672"
+    volumes:
+      - rabbit_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+    networks: [data]
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-env
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks: [app, data]
+    logging: *default-logging
+
+  worker:
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-env
+    command: ["python", "-m", "app.workers.investigation_consumer"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [app, data]
+    logging: *default-logging
+
+  scheduler:
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-env
+    command: ["python", "-m", "app.cli", "outbox-worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [app, data]
+    logging: *default-logging
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [edge, app]
+    logging: *default-logging
+
+volumes:
+  pg_data:
+  redis_data:
+  rabbit_data:
+
+networks:
+  edge:
+    driver: bridge
+  app:
+    driver: bridge
+  data:
+    driver: bridge
