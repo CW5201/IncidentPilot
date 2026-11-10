@@ -1,0 +1,84 @@
+groups:
+  # 演示服务告警规则
+  - name: incidentpilot-demo
+    rules:
+      - alert: HighErrorRate
+        # 5xx 比例超过 5%
+        expr: |
+          sum by (service) (rate(http_requests_total{service=~".+-service",status=~"5.."}[2m]))
+          /
+          sum by (service) (rate(http_requests_total{service=~".+-service"}[2m]))
+          > 0.05
+        for: 1m
+        labels:
+          severity: critical
+          namespace: demo
+        annotations:
+          summary: "{{ $labels.service }} 5xx rate above 5%"
+          description: "5xx ratio is {{ $value | humanizePercentage }} for {{ $labels.service }}."
+
+      - alert: HighLatencyP95
+        # P95 延迟超过 800ms
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, service) (
+              rate(http_request_duration_seconds_bucket{service=~".+-service"}[5m])
+            )
+          ) > 0.8
+        for: 2m
+        labels:
+          severity: warning
+          namespace: demo
+        annotations:
+          summary: "{{ $labels.service }} P95 latency above 800ms"
+          description: "P95 latency is {{ $value | humanizeDuration }} for {{ $labels.service }}."
+
+      - alert: DBPoolExhausted
+        # 库存服务连接池使用率超过 90%
+        expr: |
+          sqlalchemy_pool_checked_out{service="inventory-service"}
+          /
+          sqlalchemy_pool_size{service="inventory-service"}
+          > 0.9
+        for: 30s
+        labels:
+          severity: critical
+          namespace: demo
+        annotations:
+          summary: "inventory-service database pool is exhausted"
+          description: "Pool utilization is above 90% for inventory-service."
+
+      - alert: HighCPU
+        # CPU 使用率超过 85%
+        expr: |
+          rate(process_cpu_seconds_total{service=~".+-service"}[2m]) > 0.85
+        for: 1m
+        labels:
+          severity: warning
+          namespace: demo
+        annotations:
+          summary: "{{ $labels.service }} CPU usage above 85%"
+          description: "CPU usage is {{ $value | humanizePercentage }} for {{ $labels.service }}."
+
+      - alert: InstanceDown
+        # 实例无法被 Prometheus 抓取
+        expr: up{job=~".+-service"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          namespace: demo
+        annotations:
+          summary: "{{ $labels.service }} instance is down"
+          description: "Prometheus cannot scrape {{ $labels.instance }}."
+
+      - alert: RedisDown
+        # 订单服务无法连接 Redis
+        expr: redis_up{service="order-service"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          namespace: demo
+        annotations:
+          summary: "order-service cannot reach Redis"
+          description: "redis_up is 0 for order-service."

@@ -19,6 +19,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [PLAN.md](PLAN.md) | **实施总纲：当前进度、剩余任务、启动命令、已知问题** |
 | [docs/00-prd.md](docs/00-prd.md) | 产品需求、用户旅程、功能与非功能需求、验收标准 |
 | [docs/01-architecture.md](docs/01-architecture.md) | 系统架构、技术选型、模块划分、目录结构、部署拓扑 |
 | [docs/02-data-model.md](docs/02-data-model.md) | ER 图、核心表设计、索引、状态机、告警去重聚合 |

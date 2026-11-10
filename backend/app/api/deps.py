@@ -49,13 +49,16 @@ def require_roles(*roles: UserRole):
 
 async def verify_webhook_token(
     x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
+    authorization: str | None = Header(default=None),
 ) -> None:
     settings = get_settings()
     if settings.is_test:
         return
-    if not x_webhook_token or not constant_time_compare(
-        x_webhook_token, settings.webhook_token
-    ):
+    token = x_webhook_token
+    # 兼容 Alertmanager 的 Bearer Token
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if not token or not constant_time_compare(token, settings.webhook_token):
         raise Unauthenticated("Invalid webhook token")
 
 

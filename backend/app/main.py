@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
@@ -44,6 +45,11 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    # 暴露 Prometheus 指标
+    Instrumentator(excluded_handlers=["/metrics", "/health"]).instrument(app).expose(
+        app, endpoint="/metrics", include_in_schema=False
+    )
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict:

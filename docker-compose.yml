@@ -35,7 +35,24 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+x-demo-env: &demo-env
+  # 演示服务公共环境变量
+  APP_ENV: ${APP_ENV:-demo}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://incidentpilot:${POSTGRES_PASSWORD:-incidentpilot}@postgres:5432/incidentpilot
+  DATABASE_POOL_SIZE: ${DEMO_DB_POOL_SIZE:-5}
+  DATABASE_MAX_OVERFLOW: ${DEMO_DB_MAX_OVERFLOW:-10}
+  DATABASE_POOL_TIMEOUT: ${DEMO_DB_POOL_TIMEOUT:-2}
+  REDIS_URL: redis://toxiproxy:8666/1
+  PAYMENT_URL: http://toxiproxy:8667
+  INVENTORY_URL: http://inventory-service:8003
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_ENABLED: "true"
+  CHAOS_TOKEN: ${CHAOS_TOKEN:-dev-chaos-token}
+  REQUEST_TIMEOUT_SECONDS: ${DEMO_REQUEST_TIMEOUT_SECONDS:-2}
+
 services:
+  # 核心服务
   postgres:
     image: postgres:16-alpine
     environment:
@@ -154,15 +171,299 @@ services:
     networks: [edge, app]
     logging: *default-logging
 
+  # 演示微服务与故障注入
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.11.0
+    container_name: toxiproxy
+    profiles: ["demo"]
+    ports:
+      - "${TOXIPROXY_PORT:-8474}:8474"
+      - "${TOXIPROXY_REDIS_PORT:-8666}:8666"
+      - "${TOXIPROXY_PAYMENT_PORT:-8667}:8667"
+    networks: [demo, data]
+    restart: unless-stopped
+    logging: *default-logging
+
+  order-service:
+    build:
+      context: ./demo-services
+    container_name: order-service
+    profiles: ["demo"]
+    environment:
+      <<: *demo-env
+      SERVICE_NAME: order-service
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--proxy-headers"]
+    ports:
+      - "${ORDER_PORT:-8001}:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    networks: [demo, data, obs]
+    logging: *default-logging
+
+  order-service-b:
+    build:
+      context: ./demo-services
+    container_name: order-service-b
+    profiles: ["demo-b"]
+    environment:
+      <<: *demo-env
+      SERVICE_NAME: order-service
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--proxy-headers"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    networks: [demo, data, obs]
+    logging: *default-logging
+
+  payment-service:
+    build:
+      context: ./demo-services
+    container_name: payment-service
+    profiles: ["demo"]
+    environment:
+      <<: *demo-env
+      SERVICE_NAME: payment-service
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--proxy-headers"]
+    ports:
+      - "${PAYMENT_PORT:-8002}:8002"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks: [demo, obs]
+    logging: *default-logging
+
+  inventory-service:
+    build:
+      context: ./demo-services
+    container_name: inventory-service
+    profiles: ["demo"]
+    environment:
+      <<: *demo-env
+      SERVICE_NAME: inventory-service
+      DATABASE_MAX_OVERFLOW: ${DEMO_DB_MAX_OVERFLOW:-10}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003", "--proxy-headers"]
+    ports:
+      - "${INVENTORY_PORT:-8003}:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    networks: [demo, data, obs]
+    logging: *default-logging
+
+  chaos-controller:
+    build:
+      context: ./demo-services
+    container_name: chaos-controller
+    profiles: ["demo"]
+    environment:
+      CHAOS_ENABLED: ${CHAOS_ENABLED:-true}
+      CHAOS_TOKEN: ${CHAOS_TOKEN:-dev-chaos-token}
+      TOXIPROXY_URL: http://toxiproxy:8474
+      ORDER_URL: http://order-service:8001
+      INVENTORY_URL: http://inventory-service:8003
+      TARGET_CONTAINER: order-service
+      DEFAULT_TTL_SECONDS: ${CHAOS_DEFAULT_TTL_SECONDS:-600}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    command: ["uvicorn", "chaos_controller.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      toxiproxy:
+        condition: service_started
+      order-service:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+    restart: unless-stopped
+    networks: [demo]
+    logging: *default-logging
+
+  # 可观测性
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["obs"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/prometheus/rules:/etc/prometheus/rules:ro
+      - prom_data:/prometheus
+    restart: unless-stopped
+    networks: [obs, app, data]
+    logging: *default-logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: ["obs"]
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./infrastructure/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./infrastructure/alertmanager/webhook_token:/etc/alertmanager/webhook_token:ro
+    restart: unless-stopped
+    networks: [obs, app]
+    logging: *default-logging
+
+  loki:
+    image: grafana/loki:3.3.2
+    profiles: ["obs"]
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./infrastructure/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+    networks: [obs]
+    logging: *default-logging
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    profiles: ["obs"]
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    ports:
+      - "${TEMPO_PORT:-3200}:3200"
+    volumes:
+      - ./infrastructure/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    restart: unless-stopped
+    networks: [obs]
+    logging: *default-logging
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    profiles: ["obs"]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./infrastructure/otel/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+    networks: [obs]
+    logging: *default-logging
+
+  alloy:
+    image: grafana/alloy:v1.6.1
+    profiles: ["obs"]
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
+    volumes:
+      - ./infrastructure/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      loki:
+        condition: service_started
+    restart: unless-stopped
+    networks: [obs]
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["obs"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+    networks: [obs]
+    logging: *default-logging
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    profiles: ["obs"]
+    environment:
+      DATA_SOURCE_NAME: postgresql://incidentpilot:${POSTGRES_PASSWORD:-incidentpilot}@postgres:5432/incidentpilot?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [obs, data]
+    logging: *default-logging
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    profiles: ["obs"]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [obs, data]
+    logging: *default-logging
+
 volumes:
+  # 持久化数据
   pg_data:
   redis_data:
   rabbit_data:
+  prom_data:
+  loki_data:
+  tempo_data:
+  grafana_data:
+  alloy_data:
 
 networks:
+  # 网络隔离：边缘、应用、数据、可观测性、演示
   edge:
     driver: bridge
   app:
     driver: bridge
   data:
+    driver: bridge
+  obs:
+    driver: bridge
+  demo:
     driver: bridge
